@@ -1,6 +1,26 @@
 use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
-use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, TaskStatus};
+use crate::task::{
+    exit_current_and_run_next,
+    suspend_current_and_run_next,
+    TaskStatus,
+    current_task_info
+};
+use alloc::boxed::Box;
 use crate::timer::get_time_us;
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct TimeVal {
+    pub sec: usize,
+    pub usec: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TaskInfo {
+    status: TaskStatus,
+    syscall_times: [i32; MAX_SYSCALL_NUM],
+    time: usize,
+}
 
 pub fn sys_yield() -> isize {
     suspend_current_and_run_next();
@@ -25,19 +45,13 @@ pub fn sys_exit(exit_code: i32) -> ! {
 }
 
 pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
-    -1
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct TimeVal {
-    pub sec: usize,
-    pub usec: usize,
-}
-
-
-pub struct TaskInfo {
-    status: TaskStatus,
-    syscall_times: [u32; MAX_SYSCALL_NUM],
-    time: usize,
+    let info = current_task_info();
+    unsafe {
+        *ti = TaskInfo {
+            status: info.0,
+            syscall_times: *info.1,
+            time: info.2/1000,
+        }
+    };
+    0 
 }

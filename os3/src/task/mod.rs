@@ -6,6 +6,9 @@ mod task;
 use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use crate::timer::get_time_us;
 use lazy_static::*;
 pub use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -13,7 +16,7 @@ pub use task::{TaskControlBlock, TaskStatus};
 pub use context::TaskContext;
 pub struct TaskManager {
     num_app: usize,
-    inner: UPSafeCell<TaskManagerInner>,
+    pub inner: UPSafeCell<TaskManagerInner>,
 }
 
 
@@ -34,9 +37,12 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        // task0.time = get_time_us();
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
-        drop(inner);
         let mut _unused = TaskContext::zero_init();
+        inner.last_time = get_time_us();
+        inner.tasks[0].time=inner.last_time;
+        drop(inner);
         // before this, we should drop local variables that must be dropped manually
         unsafe {
             __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
@@ -49,6 +55,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].time == 0{
+                inner.tasks[next].time = get_time_us();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -70,20 +79,37 @@ impl TaskManager {
             .map(|id| id % self.num_app)
             .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
     }
+
+    fn current_syscall_increase(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    fn current_task_info(&self) -> (TaskStatus, Box<[i32; MAX_SYSCALL_NUM]>, usize) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        (
+            inner.tasks[current].task_status,
+            inner.tasks[current].syscall_times.clone(),
+            get_time_us() - inner.tasks[current].time,
+        )
+    }
 }
 
-struct TaskManagerInner {
-    tasks: [TaskControlBlock; MAX_APP_NUM],
-    current_task: usize,
+pub struct TaskManagerInner {
+    pub tasks: Vec<TaskControlBlock>,
+    pub current_task: usize,
+    pub last_time: usize,
 }
 
 lazy_static! {
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
-            task_cx: TaskContext::zero_init(),
-            task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+        let mut tasks =Vec::with_capacity(MAX_APP_NUM);
+        for i in 0..MAX_APP_NUM{
+            tasks.push(TaskControlBlock::new());
+        }
         for (i, t) in tasks.iter_mut().enumerate().take(num_app) {
             t.task_cx = TaskContext::goto_restore(init_app_cx(i));
             t.task_status = TaskStatus::Ready;
@@ -94,6 +120,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    last_time:0,
                 })
             },
         }
@@ -113,6 +140,7 @@ pub fn exit_current_and_run_next() {
 pub fn run_first_task() {
     TASK_MANAGER.run_first_task();
 }
+
 fn run_next_task() {
     TASK_MANAGER.run_next_task();
 }
@@ -122,4 +150,10 @@ fn mark_current_suspended() {
 fn mark_current_exited() {
     TASK_MANAGER.mark_current_exited();
 }
+pub fn current_task_info() -> (TaskStatus, Box<[i32; MAX_SYSCALL_NUM]>, usize) {
+    TASK_MANAGER.current_task_info()
+}
 
+pub fn current_syscall_increase(syscall_id: usize) {
+    TASK_MANAGER.current_syscall_increase(syscall_id)
+}
